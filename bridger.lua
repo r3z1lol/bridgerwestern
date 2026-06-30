@@ -13,17 +13,6 @@ local LP = Players.LocalPlayer
 
 local BRIDGE_PARTS = { "SaintsRightArm", "SaintsRightLeg", "SaintsRibcage", "SaintsLeftArm", "SaintsLeftLeg", "SaintsHeart" }
 
-local CORNER_OFS = {
-    Vector3.new(-0.5, -0.5, -0.5),
-    Vector3.new( 0.5, -0.5, -0.5),
-    Vector3.new(-0.5,  0.5, -0.5),
-    Vector3.new( 0.5,  0.5, -0.5),
-    Vector3.new(-0.5, -0.5,  0.5),
-    Vector3.new( 0.5, -0.5,  0.5),
-    Vector3.new(-0.5,  0.5,  0.5),
-    Vector3.new( 0.5,  0.5,  0.5),
-}
-
 local S = {
     esp_on = true, esp_box = true, esp_boxcol = Color3.fromRGB(255, 255, 255),
     esp_name = true, esp_hp = true, esp_hptxt = false, esp_dist = false,
@@ -109,7 +98,10 @@ if ce then
             corpseOwner = a[2] or "Unknown"
             if corpsePart then
                 local ok, r = pcall(function() return corpsePart:IsA("BasePart") end)
-                if not ok or not r then corpsePart = nil end
+                if not ok or not r then corpsePart = nil
+                elseif not bPool[corpsePart] then
+                    bPool[corpsePart] = {}
+                end
             end
         end)
     end)
@@ -213,24 +205,17 @@ spawn(function()
     end
 end)
 
-local corpsePartsFolder = RS:FindFirstChild("CorpseParts")
 local function isPart(v)
     local ok, r = pcall(function() return v:IsA("BasePart") end)
     return ok and r
 end
--- part discovery: scan Workspace + ReplicatedStorage.CorpseParts
+-- part discovery: scan Workspace only (dead parts tracked via remote event)
 spawn(function()
     while true do
         for _, name in ipairs(BRIDGE_PARTS) do
             local item = workspace:FindFirstChild(name, true)
             if item and isPart(item) and not bPool[item] then
                 bPool[item] = {}
-            end
-            if corpsePartsFolder then
-                local cp = corpsePartsFolder:FindFirstChild(name)
-                if cp and isPart(cp) and not bPool[cp] then
-                    bPool[cp] = {}
-                end
             end
         end
         task.wait(2)
@@ -318,7 +303,21 @@ local function render()
                 bestSp = sp
             end
         end
-        if bestSp then mousemoveabs(bestSp.X, bestSp.Y) end
+        if bestSp then
+            local smooth = g("aim_smooth")
+            if smooth and smooth > 0 then
+                local uis = game:GetService("UserInputService")
+                local ok, cur = pcall(function() return uis:GetMouseLocation() end)
+                if ok then
+                    local step = math.min(1, 1 / (smooth * 1.5))
+                    mousemoveabs(cur.X + (bestSp.X - cur.X) * step, cur.Y + (bestSp.Y - cur.Y) * step)
+                else
+                    mousemoveabs(bestSp.X, bestSp.Y)
+                end
+            else
+                mousemoveabs(bestSp.X, bestSp.Y)
+            end
+        end
     end
 
     if not espOn then
@@ -331,165 +330,130 @@ local function render()
     local mPos = lRoot and lRoot.Position or Vector3.new()
 
     -- PLAYER ESP
-    for _, plr in ipairs(plrList) do
+    local vs = Camera.ViewportSize
+    for i, plr in ipairs(plrList) do
         if plr == LP then hidePlr(plr) else
             if g("esp_teamcheck") and plr.Team and LP.Team and plr.Team == LP.Team then
-                hidePlr(plr)
-                continue
+                hidePlr(plr); continue
             end
-
             local char = plr.Character
             if not char then hidePlr(plr); continue end
             local root = char:FindFirstChild("HumanoidRootPart")
             local hum = char:FindFirstChildOfClass("Humanoid")
             if not root or not hum or hum.Health <= 0 then hidePlr(plr); continue end
-
             local dist = (root.Position - mPos).Magnitude
             if dist > g("esp_maxdist") then hidePlr(plr); continue end
-
-            -- 3-point box: head top, root center, foot bottom
             local head = char:FindFirstChild("Head")
             if not head then hidePlr(plr); continue end
             local headTop = head.Position + Vector3.new(0, head.Size.Y / 2, 0)
-            local footBot = root.Position - Vector3.new(0, 3.5, 0)
             local hp, hVis = WorldToScreen(headTop)
-            local fp, fVis = WorldToScreen(footBot)
             if not hVis then hidePlr(plr); continue end
-            local rp, rVis = WorldToScreen(root.Position)
+
+            local pid = plr.UserId or plr.Name
+            local eH = math.min(3200 / math.max(dist, 1), 200)
+            local eW = eH * 0.55
             local y1 = hp.Y
-            local y2 = fVis and fp.Y or (rVis and rp.Y or y1 + 60)
-            if y1 > y2 then y1, y2 = y2, y1 end
-            local bh = y2 - y1
-            local bw = bh * 0.55
-            local x1 = rVis and rp.X or ((hp.X + fp.X) / 2)
-            local bx = x1 - bw / 2
-            local vs = Camera.ViewportSize
-            local cx = math.max(bx, 0)
-            local cy = math.max(y1, 0)
-            local cw = math.min(bw, vs.X - cx)
-            local ch = math.min(bh, vs.Y - cy)
+            local y2 = hp.Y + eH
+            local x1 = hp.X
+            local bx = x1 - eW / 2
+            local cx = math.max(bx, 0); local cy = math.max(y1, 0)
+            local cw = math.min(eW, vs.X - cx); local ch = math.min(eH, vs.Y - cy)
 
-            local box = getD(plr, "box", "Square")
-            box.Visible = g("esp_box")
             if g("esp_box") then
-                box.Position = Vector2.new(cx, cy)
-                box.Size = Vector2.new(cw, ch)
-                box.Color = g("esp_boxcol")
-                box.Filled = false
-                box.Thickness = 1
-            end
+                local box = getD(plr, "box", "Square")
+                box.Visible = true; box.Position = Vector2.new(cx, cy); box.Size = Vector2.new(cw, ch)
+                box.Color = g("esp_boxcol"); box.Filled = false; box.Thickness = 1
+            else local b = pool[pid] and pool[pid].box; if b then b.Visible = false end end
 
-            local nameT = getD(plr, "name", "Text")
-            nameT.Visible = g("esp_name")
             if g("esp_name") then
-                nameT.Text = plr.Name
-                nameT.Position = Vector2.new(x1, y1 - 18)
-                nameT.Size = 13
-                nameT.Color = g("esp_boxcol")
-                nameT.Center = true
-                nameT.Outline = true
+                local nameT = getD(plr, "name", "Text"); nameT.Visible = true
+                nameT.Text = plr.Name; nameT.Position = Vector2.new(x1, y1 - 18); nameT.Size = 13
+                nameT.Color = g("esp_boxcol"); nameT.Center = true; nameT.Outline = true
+            else local n = pool[pid] and pool[pid].name; if n then n.Visible = false end end
+
+            if g("esp_hp") then
+                local hpBg = getD(plr, "hpBg", "Square"); local hpFill = getD(plr, "hpFill", "Square")
+                hpBg.Visible = true; hpFill.Visible = true
+                local pct = math.max(0, math.min(1, hum.Health / hum.MaxHealth))
+                local hc = Color3.fromRGB((1 - pct) * 255, pct * 255, 0)
+                hpBg.Position = Vector2.new(bx - 2, y2 + 2); hpBg.Size = Vector2.new(eW + 4, 3)
+                hpBg.Color = Color3.fromRGB(30, 30, 30); hpBg.Filled = true; hpBg.Thickness = 0
+                hpFill.Position = Vector2.new(bx - 2, y2 + 2); hpFill.Size = Vector2.new((eW + 4) * pct, 3)
+                hpFill.Color = hc; hpFill.Filled = true; hpFill.Thickness = 0
+            else
+                local b = pool[pid] and pool[pid].hpBg; if b then b.Visible = false end
+                local f = pool[pid] and pool[pid].hpFill; if f then f.Visible = false end
             end
 
-            local lt = plr:FindFirstChild("leaderstats")
-            local streakObj = lt and lt:FindFirstChild("STREAK")
-            local ageObj = lt and lt:FindFirstChild("Age")
-            local streakVal = streakObj and streakObj.Value or nil
-            local ageVal = ageObj and ageObj.Value or nil
-            local standAttr = plr:GetAttribute("EquippedStand")
+            if g("esp_hptxt") then
+                local hpTx = getD(plr, "hpTx", "Text"); hpTx.Visible = true
+                hpTx.Text = math.floor(hum.Health) .. "/" .. math.floor(hum.MaxHealth)
+                hpTx.Position = Vector2.new(x1, y2 + 8); hpTx.Size = 11
+                hpTx.Color = Color3.fromRGB(57, 255, 20); hpTx.Center = true; hpTx.Outline = true
+            else local h = pool[pid] and pool[pid].hpTx; if h then h.Visible = false end end
 
-            local hasVF = false
-            if g("ls_vampire") then
-                for _, tl in ipairs(char:GetChildren()) do
-                    if tl:IsA("Tool") and string.find(string.lower(tl.Name), "vampire") then hasVF = true; break end
-                end
-                if not hasVF then
-                    local bp2 = plr:FindFirstChild("Backpack")
-                    if bp2 then
-                        for _, tl in ipairs(bp2:GetChildren()) do
-                            if tl:IsA("Tool") and string.find(string.lower(tl.Name), "vampire") then hasVF = true; break end
+            if g("esp_dist") then
+                local distT = getD(plr, "dist", "Text"); distT.Visible = true
+                local dy = g("esp_hptxt") and y2 + 22 or y2 + 8
+                distT.Text = math.floor(dist) .. "m"; distT.Position = Vector2.new(x1, dy); distT.Size = 11
+                distT.Color = Color3.fromRGB(200, 200, 200); distT.Center = true; distT.Outline = true
+            else local d = pool[pid] and pool[pid].dist; if d then d.Visible = false end end
+
+            if g("esp_tracer") then
+                local tracer = getD(plr, "tracer", "Line"); tracer.Visible = true
+                tracer.From = Vector2.new(x1, y2); tracer.To = vs / 2
+                tracer.Color = g("esp_traccol"); tracer.Thickness = 1
+            else local t = pool[pid] and pool[pid].tracer; if t then t.Visible = false end end
+
+            -- cached leaderstats/attributes/vampire (every 5 frames)
+            if not pcache then pcache = {} end
+            if not pcache[pid] then pcache[pid] = {} end
+            local pc = pcache[pid]
+            if frame % 5 == 0 then
+                local lt = plr:FindFirstChild("leaderstats")
+                local streakObj = lt and lt:FindFirstChild("STREAK")
+                local ageObj = lt and lt:FindFirstChild("Age")
+                pc.streakVal = streakObj and streakObj.Value or nil
+                pc.ageVal = ageObj and ageObj.Value or nil
+                pc.standAttr = plr:GetAttribute("EquippedStand")
+                pc.hasVF = false
+                if g("ls_vampire") then
+                    for _, tl in ipairs(char:GetChildren()) do
+                        if tl:IsA("Tool") and string.find(string.lower(tl.Name), "vampire") then pc.hasVF = true; break end
+                    end
+                    if not pc.hasVF then
+                        local bp2 = plr:FindFirstChild("Backpack")
+                        if bp2 then
+                            for _, tl in ipairs(bp2:GetChildren()) do
+                                if tl:IsA("Tool") and string.find(string.lower(tl.Name), "vampire") then pc.hasVF = true; break end
+                            end
                         end
                     end
                 end
             end
 
             local statLines = {}
-            if g("ls_streak") and streakVal ~= nil then table.insert(statLines, "S:" .. tostring(streakVal)) end
-            if g("ls_age") and ageVal ~= nil then table.insert(statLines, "A:" .. tostring(ageVal)) end
-            if g("ls_stand") and standAttr and standAttr ~= "" then table.insert(statLines, tostring(standAttr)) end
-            if hasVF then table.insert(statLines, "VAMPIRE") end
+            if g("ls_streak") and pc.streakVal ~= nil then table.insert(statLines, "S:" .. tostring(pc.streakVal)) end
+            if g("ls_age") and pc.ageVal ~= nil then table.insert(statLines, "A:" .. tostring(pc.ageVal)) end
+            if g("ls_stand") and pc.standAttr and pc.standAttr ~= "" then table.insert(statLines, tostring(pc.standAttr)) end
+            if pc.hasVF then table.insert(statLines, "VAMPIRE") end
 
-            local statCol = Color3.fromRGB(255, 255, 0)
-            local statY = g("esp_name") and (y1 - 18 - 13) or (y1 - 13)
-            for i, line in ipairs(statLines) do
-                local st = getD(plr, "stat_" .. i, "Text")
-                st.Visible = true
-                st.Text = line
-                st.Position = Vector2.new(x1, statY - (i - 1) * 13)
-                st.Size = 11
-                st.Color = hasVF and line == "VAMPIRE" and Color3.fromRGB(255, 50, 50) or statCol
-                st.Center = true
-                st.Outline = true
+            local statY = g("esp_name") and (y1 - 31) or (y1 - 13)
+            for i2, line in ipairs(statLines) do
+                local st = getD(plr, "stat_" .. i2, "Text"); st.Visible = true
+                st.Text = line; st.Position = Vector2.new(x1, statY - (i2 - 1) * 13); st.Size = 11
+                st.Color = pc.hasVF and line == "VAMPIRE" and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(255, 255, 0)
+                st.Center = true; st.Outline = true
             end
-            for i = #statLines + 1, 5 do
-                local st = pool[plr.UserId] and pool[plr.UserId]["stat_" .. i]
+            for i2 = #statLines + 1, 5 do
+                local st = pool[pid] and pool[pid]["stat_" .. i2]
                 if st then st.Visible = false end
-            end
-
-            local hpBg = getD(plr, "hpBg", "Square")
-            local hpFill = getD(plr, "hpFill", "Square")
-            hpBg.Visible = g("esp_hp")
-            hpFill.Visible = g("esp_hp")
-            if g("esp_hp") then
-                local pct = math.max(0, math.min(1, hum.Health / hum.MaxHealth))
-                local hc = Color3.fromRGB((1 - pct) * 255, pct * 255, 0)
-                hpBg.Position = Vector2.new(bx - 2, y2 + 2)
-                hpBg.Size = Vector2.new(bw + 4, 3)
-                hpBg.Color = Color3.fromRGB(30, 30, 30)
-                hpBg.Filled = true
-                hpBg.Thickness = 0
-                hpFill.Position = Vector2.new(bx - 2, y2 + 2)
-                hpFill.Size = Vector2.new((bw + 4) * pct, 3)
-                hpFill.Color = hc
-                hpFill.Filled = true
-                hpFill.Thickness = 0
-            end
-
-            local hpTx = getD(plr, "hpTx", "Text")
-            hpTx.Visible = g("esp_hptxt")
-            if g("esp_hptxt") then
-                hpTx.Text = math.floor(hum.Health) .. "/" .. math.floor(hum.MaxHealth)
-                hpTx.Position = Vector2.new(x1, y2 + 8)
-                hpTx.Size = 11
-                hpTx.Color = Color3.fromRGB(57, 255, 20)
-                hpTx.Center = true
-                hpTx.Outline = true
-            end
-
-            local distT = getD(plr, "dist", "Text")
-            distT.Visible = g("esp_dist")
-            if g("esp_dist") then
-                local dy = g("esp_hptxt") and y2 + 22 or y2 + 8
-                distT.Text = math.floor(dist) .. "m"
-                distT.Position = Vector2.new(x1, dy)
-                distT.Size = 11
-                distT.Color = Color3.fromRGB(200, 200, 200)
-                distT.Center = true
-                distT.Outline = true
-            end
-
-            local tracer = getD(plr, "tracer", "Line")
-            tracer.Visible = g("esp_tracer")
-            if g("esp_tracer") then
-                tracer.From = Vector2.new(x1, y2)
-                tracer.To = vs / 2
-                tracer.Color = g("esp_traccol")
-                tracer.Thickness = 1
             end
         end
     end
 
-    -- cleanup stale pool entries (every 30 frames)
-    frame = (frame or 0) + 1
+    -- cleanup stale pool + pcache entries (every 30 frames)
+    -- (frame incremented in RenderStepped callback)
     if frame % 30 == 0 then
         for id, _ in pairs(pool) do
             local found
@@ -502,6 +466,7 @@ local function render()
                     for _, d in pairs(t) do pcall(d.Remove, d) end
                     pool[id] = nil
                 end
+                if pcache then pcache[id] = nil end
             end
         end
     end
@@ -517,7 +482,14 @@ local function render()
                 if t then for _, d in pairs(t) do d.Visible = false end end
             else
                 local d = (part.Position - mPos).Magnitude
-                local sp, vis = WorldToScreen(part.Position)
+                local pp = part.Position
+                if not t._c then t._c = {} end
+                local c = t._c
+                if not c.pos or (c.pos - pp).Magnitude > 0.5 then
+                    c.sp, c.vis = WorldToScreen(pp)
+                    c.pos = pp
+                end
+                local sp, vis = c.sp, c.vis
                 if vis then
                     local sz = part.Size
                     local scale = 80 / math.max(d, 1)
@@ -569,7 +541,7 @@ local function render()
         end
     end
 
-    -- CORPSE TRACKER
+    -- CORPSE TRACKER (distance-based sizing, no 8-corner)
     if g("crp_on") and corpsePart and corpsePart.Parent then
         if not crFill then
             crFill = Drawing.new("Square")
@@ -585,50 +557,31 @@ local function render()
             crDistT.Outline = true
         end
         local sp, vis = WorldToScreen(corpsePart.Position)
-        local dist = (corpsePart.Position - mPos).Magnitude
-        local sz = corpsePart.Size
-        local cf = corpsePart.CFrame
-        if not sz or not cf then
-            if crFill then
-                crFill.Visible = false; crOutline.Visible = false
-                crMarker.Visible = false; crOwnerT.Visible = false; crDistT.Visible = false
-            end
-        else
-            local mnX, mnY = math.huge, math.huge
-            local mxX, mxY = -math.huge, -math.huge
-            local any = false
-            for idx = 1, 8 do
-                local ofs = CORNER_OFS[idx]
-                local p2, v2 = WorldToScreen((cf * CFrame.new(sz.X * ofs.X, sz.Y * ofs.Y, sz.Z * ofs.Z)).Position)
-                if v2 then
-                    any = true
-                    if p2.X < mnX then mnX = p2.X end
-                    if p2.Y < mnY then mnY = p2.Y end
-                    if p2.X > mxX then mxX = p2.X end
-                    if p2.Y > mxY then mxY = p2.Y end
-                end
-            end
-            if not any and not vis then
-                crFill.Visible = false; crOutline.Visible = false
-                crMarker.Visible = false; crOwnerT.Visible = false; crDistT.Visible = false
-            else
-                if not any then mnX, mnY = sp.X - 25, sp.Y - 25; mxX, mxY = sp.X + 25, sp.Y + 25 end
-                local w = math.max(mxX - mnX, 8); local h = math.max(mxY - mnY, 8)
-                crFill.Size = Vector2.new(w, h); crFill.Position = Vector2.new(mnX, mnY)
-                crFill.Color = g("crp_col"); crFill.Filled = true; crFill.Thickness = 0
-                crFill.Transparency = 0.5; crFill.Visible = g("crp_marker")
-                crOutline.Size = Vector2.new(w, h); crOutline.Position = Vector2.new(mnX, mnY)
-                crOutline.Color = Color3.fromRGB(255, 255, 255); crOutline.Filled = false
-                crOutline.Thickness = 2; crOutline.Visible = g("crp_marker")
-                crMarker.Position = Vector2.new(sp.X, sp.Y); crMarker.Color = g("crp_col")
-                crMarker.Filled = true; crMarker.Thickness = 0; crMarker.Visible = g("crp_marker")
-                crOwnerT.Text = "☠ " .. tostring(corpseOwner)
-                crOwnerT.Position = Vector2.new(mnX + w / 2, mnY - 18)
-                crOwnerT.Size = 13; crOwnerT.Color = g("crp_col"); crOwnerT.Visible = g("crp_owner")
-                crDistT.Text = math.floor(dist) .. "m"
-                crDistT.Position = Vector2.new(mnX + w / 2, mxY + 2)
-                crDistT.Size = 11; crDistT.Color = Color3.fromRGB(200, 200, 200); crDistT.Visible = g("crp_dist")
-            end
+        local d = (corpsePart.Position - mPos).Magnitude
+        if vis then
+            local sz = corpsePart.Size
+            local scale = 80 / math.max(d, 1)
+            local w = math.max(sz.X * scale, 8)
+            local h = math.max(sz.Y * scale, 8)
+            local mnX, mnY = sp.X - w / 2, sp.Y - h / 2
+            local mxX, mxY = sp.X + w / 2, sp.Y + h / 2
+            crFill.Size = Vector2.new(w, h); crFill.Position = Vector2.new(mnX, mnY)
+            crFill.Color = g("crp_col"); crFill.Filled = true; crFill.Thickness = 0
+            crFill.Transparency = 0.5; crFill.Visible = g("crp_marker")
+            crOutline.Size = Vector2.new(w, h); crOutline.Position = Vector2.new(mnX, mnY)
+            crOutline.Color = Color3.fromRGB(255, 255, 255); crOutline.Filled = false
+            crOutline.Thickness = 2; crOutline.Visible = g("crp_marker")
+            crMarker.Position = Vector2.new(sp.X, sp.Y); crMarker.Color = g("crp_col")
+            crMarker.Filled = true; crMarker.Thickness = 0; crMarker.Visible = g("crp_marker")
+            crOwnerT.Text = "☠ " .. tostring(corpseOwner)
+            crOwnerT.Position = Vector2.new(mnX + w / 2, mnY - 18)
+            crOwnerT.Size = 13; crOwnerT.Color = g("crp_col"); crOwnerT.Visible = g("crp_owner")
+            crDistT.Text = math.floor(d) .. "m"
+            crDistT.Position = Vector2.new(mnX + w / 2, mxY + 2)
+            crDistT.Size = 11; crDistT.Color = Color3.fromRGB(200, 200, 200); crDistT.Visible = g("crp_dist")
+        elseif crFill then
+            crFill.Visible = false; crOutline.Visible = false
+            crMarker.Visible = false; crOwnerT.Visible = false; crDistT.Visible = false
         end
     elseif crFill then
         crFill.Visible = false; crOutline.Visible = false
@@ -638,6 +591,7 @@ end
 
 -- render loop
 RunService.RenderStepped:Connect(function()
+    frame = frame + 1
     local ok, err = pcall(render)
     if not ok then warn("[Bridge ESP] " .. tostring(err)) end
 end)
